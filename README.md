@@ -1,91 +1,82 @@
-# REQUIEM: AI/ML-Enabled Adaptive Noise Suppression System
+# Adaptive Noise Cancellation — Model Scaffold
 
-**Problem Statement ID: 26052**
+Starter code for the ML side of the project: causal STFT-masking denoiser
+with a FiLM-conditioned adaptive mechanism (noise-type classifier steering
+the denoiser). Matches the plan: DTLN-style causal masking, SI-SNR + spectral
+loss, PESQ/STOI evaluation, INT8 export for on-device deployment.
 
-REQUIEM is an AI/ML-enabled adaptive noise cancellation (ANC) system designed to effectively suppress stationary, non-stationary, and impulsive defence noises while maintaining high speech intelligibility and real-time performance on embedded hardware.
+## Files
 
----
+- `model.py` — the network (`AdaptiveDenoiser`). Set `use_adaptive=False` to
+  get a plain baseline for your "with vs without adaptation" comparison.
+- `dataset.py` — on-the-fly clean+noise mixing at random SNR (−5 to +15 dB).
+- `losses.py` — SI-SNR (time domain) + spectral L1, combined.
+- `train.py` — training loop. Fill in file paths in `main()`.
+- `evaluate.py` — PESQ/STOI scoring harness. This produces your PPT table.
+- `export_quantize.py` — ONNX export + INT8 quantization for P3.
 
-## 1. The Problem
-Defence and mission-critical voice communication is severely affected by stationary, non-stationary and impulsive noise. Sources include vehicle and engine noise, aircraft and helicopter noise, radio interference, footsteps, gunfire, artillery and other high-energy disturbances. Such noise can mask critical speech, reduce intelligibility and cause commands to be missed or misunderstood. 
+## Setup
 
-Conventional approaches such as spectral subtraction, Wiener filtering and classical LMS-based adaptive noise cancellation are effective under relatively predictable conditions but can struggle when the acoustic environment changes rapidly or contains strong impulsive events. They may also introduce speech distortion, musical noise and other artifacts. Therefore, a robust solution is required that can handle different types of defence noise while maintaining high speech intelligibility and supporting real-time operation on embedded hardware.
+```bash
+conda create -n anc python=3.10 -y
+conda activate anc
+pip install torch torchaudio numpy scipy soundfile librosa
+pip install pesq pystoi onnx onnxruntime
+```
 
-## 2. Solution Proposal: REQUIEM
-REQUIEM is an AI/ML-enabled adaptive noise suppression system designed for real-time defence and mission-critical communication. The proposed system combines AI-based speech enhancement, digital signal processing, multi-microphone acquisition and edge inference to suppress complex and rapidly changing noise while preserving the important characteristics of speech. 
+## Before touching this code
 
-Incoming audio is continuously processed through a hybrid AI + DSP pipeline, allowing the system to learn complex temporal and spectral characteristics of noisy environments while retaining an embedded signal-processing stage for further suppression of residual noise. The architecture is designed for low-latency and low-power operation without relying on continuous external computing. The current prototype is implemented as a 160 × 100 mm development board, with further miniaturisation planned for future versions.
+1. **Verify STFT round-trip** on a real audio file first (see the snippet
+   from earlier in the conversation). If reconstruction error isn't ~1e-6,
+   stop and fix it before training anything.
+2. **Get the pretrained DTLN baseline running** and listen to its output.
+   This is your reference point for "did fine-tuning actually help."
+3. **Confirm the latency/parameter budget with your embedded lead** before
+   you scale up `hidden` in `model.py` — bigger hidden size = better
+   quality but slower inference. Default here (128) is a reasonable
+   starting point for a Raspberry Pi–class board; adjust after you hear back.
 
-## 3. System Architecture
-The REQUIEM hardware consists of an audio acquisition stage, embedded processing stage, audio reconstruction stage and supporting sensing and communication interfaces. 
+## Workflow
 
-- **Audio Acquisition:** Uses primary and reference MEMS microphones (ICS-40300). The signal is passed through low-noise amplification and anti-alias filtering before conversion using a 24-bit ADS1274 ADC. 
-- **Embedded Processing:** The STM32H755 acts as the main embedded controller for audio preprocessing, routing, buffering and real-time signal processing. A Kendryte K210 is the target AI inference platform for running the compact speech-enhancement model. 
-- **Audio Reconstruction:** The enhanced signal is reconstructed using a PCM1794A DAC and passed through Class-D amplification to a headset or communication interface. 
-- **Sensing & Communication:** Includes the ICM-42688-P IMU for vibration-related information and BMP388 environmental sensing. 
+```bash
+# 1. Fill in clean_files / noise_files / noise_labels in train.py, then:
+python train.py
 
-The overall design uses an embedded PCB architecture with separated analogue, digital and power sections.
+# 2. Fill in test_pairs in evaluate.py, then score:
+python evaluate.py
 
-## 4. AI Model and Training Dataset
-The AI component of REQUIEM uses a compact Conv-TasNet-based speech-enhancement architecture selected for its suitability for time-domain speech processing and potential for resource-constrained deployment. The model is being prepared for INT8 quantised edge inference to reduce computational and memory requirements. 
+# 3. Once metrics look good, export + quantize for on-device deployment:
+python export_quantize.py
 
-**MAD Dataset (Military Audio Dataset)**
-To train the model on highly realistic defence scenarios, we utilize the **MAD dataset**. This is a comprehensive library of real-world military noises containing:
-- 8,000+ sound samples
-- ~12 hours of audio
-- 7 categories of defence noise: Gunfire, artillery/shelling, vehicles, helicopters, jets, footsteps, and radio chatter.
+# 4. IMPORTANT: re-run evaluate.py against the quantized model
+#    (via onnxruntime.InferenceSession) before handing to P3.
+#    Quantization can silently drop quality -- catch it here, not on hardware.
+```
 
-The training pipeline incorporates mixing clean human speech with these MAD samples at different SNRs, and applying augmentation techniques (reverberation, clipping simulation) to improve robustness. 
+## Noise class convention
 
-## 5. Results and Validation
-Initial offline evaluation has been performed using held-out noisy speech samples. The model successfully separates speech from background defence noise without prior exposure to the specific test clips.
+`noise_labels` in `train.py`/`dataset.py` expects integer class ids, e.g.:
 
-![Model Improvement](assets/model_improvement.jpg)
+```
+0 = engine
+1 = rotor
+2 = gunfire
+3 = wind
+4 = radio chatter
+```
 
-**Performance Metrics:**
-- **PESQ (Clarity):** Improved from 1.28 to 1.93 (+51%)
-- **STOI (Intelligibility):** Improved from 0.86 to 0.92 (+6.5%, exceeding the target of 0.85)
-- **SI-SNR (Signal Strength):** Improved from 5.0 dB to 12.7 dB (+7.7 dB)
+Adjust `n_classes` in `model.py` / `train.py` to match how many categories
+P2's dataset actually covers. Keep it small (4-6 classes) — more classes
+means more data needed per class to train the classifier reliably in your
+timeframe.
 
-**Spectrogram Analysis:**
-As seen in the visual comparison below, the quieter spaces between words appear significantly cleaner and darker, showing massive reduction in background noise while the speech structure itself remains preserved and intact.
+## Debugging checklist if metrics aren't improving
 
-![Spectrogram Comparison](assets/spectrogram_comparison.jpg)
-
-The current PESQ and SI-SNR results are ongoing optimisation targets (aiming for PESQ > 2.5 and SNR improvement > 15 dB).
-
-## 6. Embedded Performance Targets
-- **Latency:** < 20 ms
-- **SNR Improvement:** > 15 dB
-- **Power Consumption:** < 5 W
-- **Operating Temperature:** -40°C to +85°C
-
-The proposed mitigation approach combines AI-based temporal speech enhancement, multi-microphone acquisition, hybrid AI + DSP processing, INT8 quantisation and edge inference. Adaptive residual filtering is considered as an additional processing stage.
-
-## 7. Prototype BOM (Bill of Materials)
-- **Audio Acquisition & Signal Conditioning** (ICS-40300, INA217, MAX7401, ADS1274): ~$71
-- **MCU & AI-Processing** (STM32H755, Kendryte K210): ~$40
-- **Memory & Sensing** (SDRAM, W25Q128, ICM-42688-P, BMP388): ~$15
-- **Audio Output** (PCM1794A, Class-D Amp): ~$34
-- **Communication & Power**: ~$12
-- **Prototype PCB**: ~$45
-- **Estimated Total Prototype BOM:** $230–$250 per board (₹22,000–₹24,000)
-
-## 8. Novelty
-The key novelty of REQUIEM lies in combining AI-based speech enhancement with embedded DSP and edge processing within a unified architecture for complex defence communication noise. Instead of relying exclusively on conventional filtering, the system uses a learned speech-enhancement model to capture complex temporal and spectral characteristics of noise while maintaining a DSP stage for residual suppression and signal conditioning.
-
-## 9. Impact and Scalability
-REQUIEM improves speech intelligibility in high-noise environments where conventional noise suppression becomes less effective. 
-- **Primary Application:** Defence and mission-critical communication (tactical vehicles, field communication, aviation).
-- **Scalability:** Modular architecture allows adaptation to different microphones, processors, and environments. Can be extended to emergency-response systems, industrial machinery, and aerospace applications.
-
-## 10. Current Status and Future Work
-- **Current Status:** AI model development, data generation methodology, offline evaluation, system architecture, circuit/schematic development, and PCB layout are completed.
-- **Future Work:** INT8 model benchmarking, embedded AI integration, real-time hardware validation, headset testing, further optimisation of PESQ/SI-SNR, power optimisation, and PCB miniaturisation.
-
-## 11. References
-- Luo and Mesgarani, “Conv-TasNet: Surpassing Ideal Time-Frequency Masking for Speech Separation”, IEEE/ACM.
-- Narain, Kant and Singh, “Artificial Intelligence Driven Advances in Noise Cancellation”.
-- Kar and Mukherjee, “Acoustic Signal Enhancement Using Deep Neural Networks”.
-- “Selective Noise Cancellation Using Machine Learning”.
-- ITU-T P.862 methodology for PESQ and STOI methodology.
+- Confirm `clean_files` and `noise_files` aren't empty / paths are correct
+  (there's an `assert` for this in `train.py`, but double check contents).
+- Check the SI-SNR loss is going *down* — if it's flat or NaN, lower the
+  learning rate first (try `5e-4`) before changing architecture.
+- Listen to actual output files, not just the metric numbers — over-
+  suppression scores deceptively well on some metrics but sounds bad.
+- Make sure your train/val split uses entirely separate noise *recordings*,
+  not just separate random clips from the same recording (data leak).
